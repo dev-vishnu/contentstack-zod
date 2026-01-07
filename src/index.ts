@@ -22,8 +22,8 @@
 import { z, ZodTypeAny, ZodError } from "zod";
 
 /* ============================================================
- * Zod Version Compatibility Helper
- * Supports both Zod v3 (.passthrough()) and v4 (looseObject)
+ * Zod Version Compatibility Helpers
+ * Supports both Zod v3 and v4 APIs
  * ============================================================ */
 
 type ZodObjectShape = Record<string, ZodTypeAny>;
@@ -31,9 +31,28 @@ type ZodObjectShape = Record<string, ZodTypeAny>;
 function createLooseObject<T extends ZodObjectShape>(shape: T) {
   // Zod v4 uses z.looseObject, v3 uses z.object().passthrough()
   if (typeof (z as any).looseObject === "function") {
-    return (z as any).looseObject(shape);
+    return (z as any).looseObject(shape) as ReturnType<typeof z.object<T>> & {
+      _input: z.infer<ReturnType<typeof z.object<T>>> & Record<string, unknown>;
+      _output: z.infer<ReturnType<typeof z.object<T>>> & Record<string, unknown>;
+    };
   }
   return z.object(shape).passthrough();
+}
+
+function createUrlSchema() {
+  // Zod v4 uses z.url(), v3 uses z.string().url()
+  if (typeof (z as any).url === "function") {
+    return (z as any).url();
+  }
+  return z.string().url();
+}
+
+function createDatetimeSchema() {
+  // Zod v4 uses z.iso.datetime(), v3 uses z.string().datetime()
+  if ((z as any).iso?.datetime) {
+    return (z as any).iso.datetime();
+  }
+  return z.string().datetime();
 }
 
 /* ============================================================
@@ -76,22 +95,26 @@ export interface ContentstackContentType {
 
 const UID = z.string().min(1);
 
-export const AssetSchema = createLooseObject({
+// Define schema shapes as constants for proper type inference
+const AssetShape = {
   uid: UID,
   url: z.string().optional(),
-});
+} as const;
 
-export const ReferenceSchema = createLooseObject({
+const ReferenceShape = {
   uid: UID,
   _content_type_uid: z.string().optional(),
-});
+} as const;
+
+export const AssetSchema = createLooseObject(AssetShape);
+export const ReferenceSchema = createLooseObject(ReferenceShape);
 
 export const LinkSchema = z.object({
   title: z.string().optional(),
-  url: z.string().url().optional(),
+  url: createUrlSchema().optional(),
 });
 
-export const IsoDateSchema = z.string().datetime();
+export const IsoDateSchema = createDatetimeSchema();
 
 export const TaxonomySchema = z.array(
   z.object({
@@ -246,7 +269,7 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
 
 export function contentTypeToZod(
   contentType: ContentstackContentType
-): z.ZodObject<Record<string, ZodTypeAny>> {
+) {
   if (!contentType?.schema) {
     throw new Error("Invalid Contentstack content type schema");
   }
