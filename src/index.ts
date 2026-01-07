@@ -22,6 +22,21 @@
 import { z, ZodTypeAny, ZodError } from "zod";
 
 /* ============================================================
+ * Zod Version Compatibility Helper
+ * Supports both Zod v3 (.passthrough()) and v4 (looseObject)
+ * ============================================================ */
+
+type ZodObjectShape = Record<string, ZodTypeAny>;
+
+function createLooseObject<T extends ZodObjectShape>(shape: T) {
+  // Zod v4 uses z.looseObject, v3 uses z.object().passthrough()
+  if (typeof (z as any).looseObject === "function") {
+    return (z as any).looseObject(shape);
+  }
+  return z.object(shape).passthrough();
+}
+
+/* ============================================================
  * Type Definitions
  * ============================================================ */
 
@@ -61,19 +76,15 @@ export interface ContentstackContentType {
 
 const UID = z.string().min(1);
 
-export const AssetSchema = z
-  .object({
-    uid: UID,
-    url: z.string().optional(),
-  })
-  .passthrough();
+export const AssetSchema = createLooseObject({
+  uid: UID,
+  url: z.string().optional(),
+});
 
-export const ReferenceSchema = z
-  .object({
-    uid: UID,
-    _content_type_uid: z.string().optional(),
-  })
-  .passthrough();
+export const ReferenceSchema = createLooseObject({
+  uid: UID,
+  _content_type_uid: z.string().optional(),
+});
 
 export const LinkSchema = z.object({
   title: z.string().optional(),
@@ -264,12 +275,18 @@ export function contentTypeToDraftZod(contentType: ContentstackContentType) {
 /**
  * Extract missing required fields from a Zod validation error.
  * Returns an array of dot-notation field paths.
+ * Compatible with both Zod v3 and v4 error formats.
  */
 export function extractMissingFields(zodError: ZodError): string[] {
   return zodError.issues
-    .filter(
-      (issue) => issue.code === "invalid_type" && issue.received === "undefined"
-    )
+    .filter((issue) => {
+      if (issue.code !== "invalid_type") return false;
+      // Zod v3: has `received` property
+      if ("received" in issue && (issue as any).received === "undefined") return true;
+      // Zod v4: check message for "undefined"
+      if (issue.message?.includes("received undefined")) return true;
+      return false;
+    })
     .map((issue) => issue.path.join("."));
 }
 
