@@ -131,6 +131,15 @@ export interface ContentstackContentType {
   schema: ContentstackField[];
 }
 
+export interface SchemaOptions {
+  /**
+   * Schema generation mode:
+   * - 'read': For validating API responses (assets as objects) - default
+   * - 'upsert': For validating create/update payloads (assets as UID strings)
+   */
+  mode?: 'read' | 'upsert';
+}
+
 /* ============================================================
  * Description Helper for LLM Consumption
  * ============================================================ */
@@ -222,8 +231,9 @@ export type TaxonomyEntry = z.infer<typeof TaxonomySchema>[number];
  * Field → Zod Mapper
  * ============================================================ */
 
-export function fieldToZod(field: ContentstackField): ZodTypeAny {
+export function fieldToZod(field: ContentstackField, options?: SchemaOptions): ZodTypeAny {
   let schema: ZodTypeAny;
+  const isUpsertMode = options?.mode === 'upsert';
 
   switch (field.data_type) {
     /* ---------- TEXT / STRING ---------- */
@@ -296,7 +306,9 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
 
     /* ---------- FILE ---------- */
     case "file":
-      schema = AssetSchema;
+      // Upsert mode: just the asset UID string
+      // Read mode: full asset object
+      schema = isUpsertMode ? z.string() : AssetSchema;
       break;
 
     /* ---------- LINK ---------- */
@@ -320,7 +332,7 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
       const groupShape: Record<string, ZodTypeAny> = {};
 
       for (const subField of field.schema || []) {
-        groupShape[subField.uid] = fieldToZod(subField);
+        groupShape[subField.uid] = fieldToZod(subField, options);
       }
 
       // Add _metadata support (Contentstack adds this to repeatable groups)
@@ -354,7 +366,7 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
 
         const blockShape: Record<string, ZodTypeAny> = {};
         for (const subField of block.schema || []) {
-          blockShape[subField.uid] = fieldToZod(subField);
+          blockShape[subField.uid] = fieldToZod(subField, options);
         }
         // Add _metadata support (Contentstack adds this to block items)
         blockShape["_metadata"] = z.object({
@@ -408,8 +420,15 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
  * Content Type → Entry Zod Schema
  * ============================================================ */
 
+/**
+ * Converts a Contentstack content type schema to a Zod schema.
+ * @param contentType - The Contentstack content type definition
+ * @param options - Schema generation options
+ * @param options.mode - 'read' for API responses (default), 'upsert' for create/update payloads
+ */
 export function contentTypeToZod(
-  contentType: ContentstackContentType
+  contentType: ContentstackContentType,
+  options?: SchemaOptions
 ) {
   if (!contentType?.schema) {
     throw new Error("Invalid Contentstack content type schema");
@@ -418,7 +437,7 @@ export function contentTypeToZod(
   const shape: Record<string, ZodTypeAny> = {};
 
   for (const field of contentType.schema) {
-    shape[field.uid] = fieldToZod(field);
+    shape[field.uid] = fieldToZod(field, options);
   }
 
   return z.object(shape);
@@ -432,8 +451,8 @@ export function contentTypeToZod(
  * Creates a partial/draft schema where all fields are optional.
  * Useful for LLM-generated content or partial input validation.
  */
-export function contentTypeToDraftZod(contentType: ContentstackContentType) {
-  return contentTypeToZod(contentType).partial();
+export function contentTypeToDraftZod(contentType: ContentstackContentType, options?: SchemaOptions) {
+  return contentTypeToZod(contentType, options).partial();
 }
 
 /**

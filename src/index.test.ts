@@ -533,3 +533,98 @@ describe("Group max_instance", () => {
     ])).toThrow();
   });
 });
+
+describe("Upsert Mode", () => {
+  it("should accept asset UID string in upsert mode", () => {
+    const field: ContentstackField = {
+      uid: "image",
+      data_type: "file",
+      mandatory: true,
+    };
+
+    const schema = fieldToZod(field, { mode: 'upsert' });
+    expect(schema.parse("asset123")).toBe("asset123");
+    expect(() => schema.parse({ uid: "asset123" })).toThrow();
+  });
+
+  it("should accept asset object in read mode (default)", () => {
+    const field: ContentstackField = {
+      uid: "image",
+      data_type: "file",
+      mandatory: true,
+    };
+
+    const schema = fieldToZod(field); // default is read mode
+    const asset = { uid: "asset123", url: "https://example.com/image.png" };
+    expect(schema.parse(asset)).toMatchObject(asset);
+    expect(() => schema.parse("asset123")).toThrow();
+  });
+
+  it("should handle nested assets in groups with upsert mode", () => {
+    const field: ContentstackField = {
+      uid: "gallery",
+      data_type: "group",
+      mandatory: true,
+      schema: [
+        { uid: "title", data_type: "text", mandatory: true },
+        { uid: "image", data_type: "file", mandatory: true },
+      ],
+    };
+
+    const schema = fieldToZod(field, { mode: 'upsert' });
+    const group = { title: "My Gallery", image: "asset123" };
+    expect(schema.parse(group)).toMatchObject(group);
+  });
+
+  it("should handle assets in modular blocks with upsert mode", () => {
+    const field: ContentstackField = {
+      uid: "content",
+      data_type: "blocks",
+      mandatory: true,
+      blocks: [
+        {
+          uid: "image_block",
+          schema: [
+            { uid: "caption", data_type: "text", mandatory: true },
+            { uid: "image", data_type: "file", mandatory: true },
+          ],
+        },
+      ],
+    };
+
+    const schema = fieldToZod(field, { mode: 'upsert' });
+    const blocks = [{ image_block: { caption: "Photo", image: "asset123" } }];
+    expect(schema.parse(blocks)).toMatchObject(blocks);
+  });
+
+  it("should work with contentTypeToZod in upsert mode", () => {
+    const contentType: ContentstackContentType = {
+      uid: "blog_post",
+      schema: [
+        { uid: "title", data_type: "text", mandatory: true },
+        { uid: "featured_image", data_type: "file", mandatory: true },
+        { uid: "gallery", data_type: "file", mandatory: false, multiple: true },
+      ],
+    };
+
+    const schema = contentTypeToZod(contentType, { mode: 'upsert' });
+    const entry = {
+      title: "My Post",
+      featured_image: "asset123",
+      gallery: ["asset456", "asset789"],
+    };
+    expect(schema.parse(entry)).toMatchObject(entry);
+  });
+
+  it("should keep references as objects in upsert mode", () => {
+    const field: ContentstackField = {
+      uid: "author",
+      data_type: "reference",
+      mandatory: true,
+    };
+
+    const schema = fieldToZod(field, { mode: 'upsert' });
+    const ref = { uid: "author123", _content_type_uid: "author" };
+    expect(schema.parse(ref)).toMatchObject(ref);
+  });
+});
