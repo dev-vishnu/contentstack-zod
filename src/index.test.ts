@@ -9,6 +9,7 @@ import {
   validateDraft,
   ContentstackContentType,
   ContentstackField,
+  JsonRteSchema,
 } from "./index";
 
 describe("fieldToZod", () => {
@@ -323,5 +324,212 @@ describe("validateDraft", () => {
     if (result.success) {
       expect(result.data).toMatchObject({ title: "Only title" });
     }
+  });
+});
+
+describe("Field Descriptions for LLM", () => {
+  it("should add description from field_metadata.description", () => {
+    const field: ContentstackField = {
+      uid: "hero_heading",
+      display_name: "Hero Heading",
+      data_type: "text",
+      mandatory: true,
+      field_metadata: {
+        description: "Main headline for the hero section",
+      },
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.description).toBe("Main headline for the hero section");
+  });
+
+  it("should fallback to display_name when no description", () => {
+    const field: ContentstackField = {
+      uid: "hero_heading",
+      display_name: "Hero Heading",
+      data_type: "text",
+      mandatory: true,
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.description).toBe("Hero Heading");
+  });
+
+  it("should fallback to uid when no display_name or description", () => {
+    const field: ContentstackField = {
+      uid: "hero_heading",
+      data_type: "text",
+      mandatory: true,
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.description).toBe("hero_heading");
+  });
+
+  it("should add descriptions to nested group fields", () => {
+    const field: ContentstackField = {
+      uid: "seo",
+      display_name: "SEO Settings",
+      data_type: "group",
+      mandatory: true,
+      schema: [
+        {
+          uid: "meta_title",
+          display_name: "Meta Title",
+          data_type: "text",
+          mandatory: true,
+          field_metadata: { description: "Page title for search engines" },
+        },
+      ],
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.description).toBe("SEO Settings");
+    
+    // Verify nested fields work by parsing valid data
+    const validData = { meta_title: "Test Title" };
+    expect(schema.parse(validData)).toMatchObject(validData);
+  });
+});
+
+describe("JSON RTE Schema", () => {
+  it("should validate JSON RTE content", () => {
+    const validJsonRte = {
+      type: "doc",
+      uid: "doc123",
+      children: [
+        {
+          type: "p",
+          children: [
+            { text: "Hello " },
+            { text: "world", bold: true },
+          ],
+        },
+      ],
+    };
+
+    expect(JsonRteSchema.parse(validJsonRte)).toMatchObject(validJsonRte);
+  });
+
+  it("should use JsonRteSchema for fields with allow_json_rte", () => {
+    const field: ContentstackField = {
+      uid: "content",
+      data_type: "json",
+      mandatory: true,
+      field_metadata: {
+        allow_json_rte: true,
+      },
+    };
+
+    const schema = fieldToZod(field);
+    const validContent = {
+      type: "doc",
+      children: [{ type: "p", children: [{ text: "Test" }] }],
+    };
+    expect(schema.parse(validContent)).toMatchObject(validContent);
+  });
+});
+
+describe("HTML RTE Detection", () => {
+  it("should handle HTML RTE fields (allow_rich_text)", () => {
+    const field: ContentstackField = {
+      uid: "body",
+      data_type: "text",
+      mandatory: true,
+      field_metadata: {
+        allow_rich_text: true,
+        rich_text_type: "advanced",
+      },
+    };
+
+    const schema = fieldToZod(field);
+    const htmlContent = "<p>Hello <strong>world</strong></p>";
+    expect(schema.parse(htmlContent)).toBe(htmlContent);
+  });
+});
+
+describe("Regex Validation", () => {
+  it("should apply regex format validation", () => {
+    const field: ContentstackField = {
+      uid: "email",
+      data_type: "text",
+      mandatory: true,
+      format: "^[a-zA-Z0-9+_.-]+@[a-zA-Z0-9.-]+$",
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.parse("test@example.com")).toBe("test@example.com");
+    expect(() => schema.parse("not-an-email")).toThrow();
+  });
+
+  it("should handle invalid regex gracefully", () => {
+    const field: ContentstackField = {
+      uid: "text",
+      data_type: "text",
+      mandatory: true,
+      format: "[invalid regex",
+    };
+
+    // Should not throw, just skip regex validation
+    const schema = fieldToZod(field);
+    expect(schema.parse("any text")).toBe("any text");
+  });
+});
+
+describe("Date Range Constraints", () => {
+  it("should enforce startDate constraint", () => {
+    const field: ContentstackField = {
+      uid: "event_date",
+      data_type: "isodate",
+      mandatory: true,
+      startDate: "2024-01-01T00:00:00Z",
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.parse("2024-06-15T10:00:00Z")).toBe("2024-06-15T10:00:00Z");
+    expect(() => schema.parse("2023-06-15T10:00:00Z")).toThrow();
+  });
+
+  it("should enforce endDate constraint", () => {
+    const field: ContentstackField = {
+      uid: "event_date",
+      data_type: "isodate",
+      mandatory: true,
+      endDate: "2024-12-31T23:59:59Z",
+    };
+
+    const schema = fieldToZod(field);
+    expect(schema.parse("2024-06-15T10:00:00Z")).toBe("2024-06-15T10:00:00Z");
+    expect(() => schema.parse("2025-06-15T10:00:00Z")).toThrow();
+  });
+});
+
+describe("Group max_instance", () => {
+  it("should enforce max_instance on repeatable groups", () => {
+    const field: ContentstackField = {
+      uid: "authors",
+      data_type: "group",
+      mandatory: true,
+      multiple: true,
+      max_instance: 3,
+      schema: [{ uid: "name", data_type: "text", mandatory: true }],
+    };
+
+    const schema = fieldToZod(field);
+    
+    // Should accept up to 3 items
+    expect(schema.parse([
+      { name: "Alice" },
+      { name: "Bob" },
+      { name: "Charlie" },
+    ])).toHaveLength(3);
+
+    // Should reject more than 3 items
+    expect(() => schema.parse([
+      { name: "Alice" },
+      { name: "Bob" },
+      { name: "Charlie" },
+      { name: "Dave" },
+    ])).toThrow();
   });
 });

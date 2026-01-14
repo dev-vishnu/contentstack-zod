@@ -48,11 +48,20 @@ function createUrlSchema() {
 }
 
 function createDatetimeSchema() {
-  // Zod v4 uses z.iso.datetime(), v3 uses z.string().datetime()
-  if ((z as any).iso?.datetime) {
-    return (z as any).iso.datetime();
-  }
-  return z.string().datetime();
+  // Contentstack returns ISO dates which can be:
+  // - Full datetime: "2011-04-02T00:00:00.000Z"
+  // - Date only: "2011-04-02"
+  // We accept both formats
+  return z.string().refine(
+    (val) => {
+      // Try full datetime first
+      if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$/.test(val)) return true;
+      // Allow date-only format
+      if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return true;
+      return false;
+    },
+    { message: "Invalid ISO date/datetime format" }
+  );
 }
 
 /* ============================================================
@@ -61,14 +70,36 @@ function createDatetimeSchema() {
 
 export interface ContentstackEnumChoice {
   value: string;
+  key?: string;
 }
 
 export interface ContentstackEnum {
   choices?: ContentstackEnumChoice[];
+  advanced?: boolean;
+}
+
+export interface ContentstackFieldMetadata {
+  description?: string;
+  instruction?: string;
+  markdown?: boolean;
+  allow_rich_text?: boolean;
+  allow_json_rte?: boolean;
+  multiline?: boolean;
+  rich_text_type?: string;
+  default_value?: any;
+  _default?: boolean;
+}
+
+export interface ContentstackTaxonomyConfig {
+  taxonomy_uid: string;
+  max_terms?: number;
+  mandatory?: boolean;
+  non_localizable?: boolean;
 }
 
 export interface ContentstackBlock {
   uid: string;
+  title?: string;
   reference_to?: string;
   schema?: ContentstackField[];
 }
@@ -76,11 +107,22 @@ export interface ContentstackBlock {
 export interface ContentstackField {
   uid: string;
   data_type: string;
+  display_name?: string;
   mandatory?: boolean;
   multiple?: boolean;
+  unique?: boolean;
   enum?: ContentstackEnum;
   schema?: ContentstackField[];
   blocks?: ContentstackBlock[];
+  field_metadata?: ContentstackFieldMetadata;
+  format?: string;
+  reference_to?: string | string[];
+  startDate?: string | null;
+  endDate?: string | null;
+  max_instance?: number;
+  extensions?: string[];
+  extension_uid?: string;
+  taxonomies?: ContentstackTaxonomyConfig[];
 }
 
 export interface ContentstackContentType {
@@ -88,6 +130,50 @@ export interface ContentstackContentType {
   title?: string;
   schema: ContentstackField[];
 }
+
+/* ============================================================
+ * Description Helper for LLM Consumption
+ * ============================================================ */
+
+/**
+ * Generates a minimal, clean description for a field.
+ * Used by .describe() for JSON Schema generation.
+ * Priority: description > display_name > uid
+ */
+function getFieldDescription(field: ContentstackField): string {
+  return field.field_metadata?.description 
+    || field.display_name 
+    || field.uid;
+}
+
+/* ============================================================
+ * JSON Rich Text Editor Schema
+ * ============================================================ */
+
+/**
+ * Recursive schema for JSON RTE nodes.
+ * Supports nested children for complex rich text structures.
+ */
+export const JsonRteNodeSchema: z.ZodType<any> = z.lazy(() =>
+  z.object({
+    type: z.string().optional(),
+    text: z.string().optional(),
+    children: z.array(JsonRteNodeSchema).optional(),
+    attrs: z.record(z.string(), z.any()).optional(),
+    uid: z.string().optional(),
+  }).passthrough()
+);
+
+/**
+ * Schema for JSON Rich Text Editor content.
+ * Root document with type "doc" containing child nodes.
+ */
+export const JsonRteSchema = z.object({
+  type: z.literal("doc"),
+  uid: z.string().optional(),
+  attrs: z.record(z.string(), z.any()).optional(),
+  children: z.array(JsonRteNodeSchema),
+}).passthrough().describe("JSON Rich Text Editor content");
 
 /* ============================================================
  * Base Primitives
@@ -111,8 +197,8 @@ export const ReferenceSchema = createLooseObject(ReferenceShape);
 
 export const LinkSchema = z.object({
   title: z.string().optional(),
-  url: createUrlSchema().optional(),
-});
+  href: z.string().optional(),  // Contentstack uses 'href' not 'url'
+}).passthrough();
 
 export const IsoDateSchema = createDatetimeSchema();
 
@@ -142,7 +228,13 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
   switch (field.data_type) {
     /* ---------- TEXT / STRING ---------- */
     case "text": {
-      // Select field
+      // HTML Rich Text Editor (has allow_rich_text in field_metadata)
+      if (field.field_metadata?.allow_rich_text) {
+        schema = z.string();
+        break;
+      }
+      
+      // Select field with enum choices
       if (field.enum?.choices?.length) {
         const values = field.enum.choices.map((c) => c.value) as [
           string,
@@ -151,6 +243,14 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
         schema = z.enum(values);
       } else {
         schema = z.string();
+        // Apply regex validation if format is provided
+        if (field.format) {
+          try {
+            schema = (schema as z.ZodString).regex(new RegExp(field.format));
+          } catch {
+            // Invalid regex, skip validation
+          }
+        }
       }
       break;
     }
@@ -163,14 +263,36 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
       schema = z.boolean();
       break;
 
-    case "isodate":
+    case "isodate": {
       schema = IsoDateSchema;
+      // Add date range constraints if startDate/endDate provided
+      if (field.startDate || field.endDate) {
+        const startDate = field.startDate ? new Date(field.startDate) : null;
+        const endDate = field.endDate ? new Date(field.endDate) : null;
+        schema = z.string().datetime().refine(
+          (val) => {
+            const date = new Date(val);
+            if (startDate && date < startDate) return false;
+            if (endDate && date > endDate) return false;
+            return true;
+          },
+          { message: "Date out of allowed range" }
+        );
+      }
       break;
+    }
 
     /* ---------- JSON / RTE / EXTENSIONS ---------- */
-    case "json":
-      schema = z.any();
+    case "json": {
+      // JSON Rich Text Editor
+      if (field.field_metadata?.allow_json_rte) {
+        schema = JsonRteSchema;
+      } else {
+        // Custom extensions or generic JSON
+        schema = z.any();
+      }
       break;
+    }
 
     /* ---------- FILE ---------- */
     case "file":
@@ -201,10 +323,21 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
         groupShape[subField.uid] = fieldToZod(subField);
       }
 
-      schema = z.object(groupShape);
+      // Add _metadata support (Contentstack adds this to repeatable groups)
+      if (field.multiple) {
+        groupShape["_metadata"] = z.object({
+          uid: z.string().optional(),
+        }).passthrough().optional();
+      }
+
+      schema = z.object(groupShape).passthrough();
 
       if (field.multiple) {
         schema = z.array(schema);
+        // Apply max_instance constraint for repeatable groups
+        if (field.max_instance && field.max_instance > 0) {
+          schema = (schema as z.ZodArray<any>).max(field.max_instance);
+        }
       }
       break;
     }
@@ -216,17 +349,21 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
         if (block.reference_to) {
           return z.object({
             [block.uid]: ReferenceSchema,
-          });
+          }).passthrough();
         }
 
         const blockShape: Record<string, ZodTypeAny> = {};
         for (const subField of block.schema || []) {
           blockShape[subField.uid] = fieldToZod(subField);
         }
+        // Add _metadata support (Contentstack adds this to block items)
+        blockShape["_metadata"] = z.object({
+          uid: z.string().optional(),
+        }).passthrough().optional();
 
         return z.object({
-          [block.uid]: z.object(blockShape),
-        });
+          [block.uid]: z.object(blockShape).passthrough(),
+        }).passthrough();
       });
 
       if (blockSchemas.length === 0) {
@@ -255,10 +392,14 @@ export function fieldToZod(field: ContentstackField): ZodTypeAny {
     schema = z.array(schema);
   }
 
-  /* ---------- MANDATORY ---------- */
+  /* ---------- MANDATORY + NULLABLE ---------- */
+  // Contentstack returns `null` for empty optional fields
   if (!field.mandatory) {
-    schema = schema.optional();
+    schema = schema.nullable().optional();
   }
+
+  /* ---------- DESCRIPTION FOR LLM ---------- */
+  schema = schema.describe(getFieldDescription(field));
 
   return schema;
 }
@@ -366,4 +507,7 @@ export default {
   LinkSchema,
   IsoDateSchema,
   TaxonomySchema,
+  // JSON RTE schemas
+  JsonRteSchema,
+  JsonRteNodeSchema,
 };
