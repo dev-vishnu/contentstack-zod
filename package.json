@@ -1,6 +1,6 @@
 {
   "name": "@apexdevlabs/contentstack-zod",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "Convert Contentstack content type schemas to Zod validation schemas",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
